@@ -1,0 +1,501 @@
+From e2f961409e652c15360ba310e5b13fa0fcc1300a Mon Sep 17 00:00:00 2001
+From: Marko Maksimovic <reaktansa@gmail.com>
+Date: Tue, 17 Nov 2026 21:53:55 +0100
+Subject: [PATCH] ath79: add support for ASUS RT-AC55U
+
+Specifications:
+- SoC: Qualcomm Atheros QCA9558
+- RAM: 128 MiB DDR2
+- Flash: 128 MiB NAND (Winbond W29N01GV)
+- Ethernet: 5x 1GbE (AR8337), WAN on eth0 (RGMII), LAN on eth1 (SGMII)
+- WiFi 2.4 GHz: QCA9558 WMAC, 2x2 802.11n
+- WiFi 5 GHz: QCA9882, 2x2 802.11ac
+- USB: 1x USB 3.0 (Etron EJ168), 1x USB 2.0
+- Buttons: reset, WPS
+- LEDs: power, WPS, LAN, WAN (blue/red), 2.4 GHz, 5 GHz, USB 2.0, USB 3.0
+- Serial: 115200 8N1
+
+Flash layout:
+The ASUS bootloader enforces its UBI layout on every boot: the "linux"
+volume is recreated if smaller than 0x3013000 bytes, it is restored from
+"linux2" if its checksum fails, and missing "lsdk"/"jffs2" volumes are
+recreated if free space is available. OpenWrt therefore updates the kernel
+in "linux" in place, keeps "linux2" as fallback image and gives the rest
+of the space to "rootfs" and "rootfs_data". Calibration data and MAC
+addresses are read from the "Factory" UBI volume.
+
+Installation:
+1. Upload the initramfs-factory.trx in the stock web UI
+   (Administration -> Firmware Upgrade).
+2. Flash the sysupgrade.bin from the running OpenWrt initramfs.
+
+Revert to stock:
+sysupgrade -F -n <official ASUS firmware .trx>
+
+Signed-off-by: Marko Maksimovic <reaktansa@gmail.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../linux/ath79/dts/qca9558_asus_rt-ac55u.dts | 246 ++++++++++++++++++
+ target/linux/ath79/image/nand.mk              |  39 +++
+ .../ath79/nand/base-files/etc/board.d/01_leds |   5 +
+ .../nand/base-files/etc/board.d/02_network    |   4 +
+ .../ath79/nand/base-files/lib/upgrade/asus.sh |  84 ++++++
+ .../nand/base-files/lib/upgrade/platform.sh   |   4 +
+ target/linux/ath79/nand/config-default        |   1 +
+ 7 files changed, 383 insertions(+)
+ create mode 100644 target/linux/ath79/dts/qca9558_asus_rt-ac55u.dts
+ create mode 100644 target/linux/ath79/nand/base-files/lib/upgrade/asus.sh
+
+diff --git a/target/linux/ath79/dts/qca9558_asus_rt-ac55u.dts b/target/linux/ath79/dts/qca9558_asus_rt-ac55u.dts
+new file mode 100644
+index 0000000000..c1ed899a78
+--- /dev/null
++++ b/target/linux/ath79/dts/qca9558_asus_rt-ac55u.dts
+@@ -0,0 +1,246 @@
++// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
++
++#include "qca955x.dtsi"
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/leds/common.h>
++
++/ {
++	compatible = "asus,rt-ac55u", "qca,qca9558";
++	model = "ASUS RT-AC55U";
++
++	aliases {
++		led-boot = &led_power;
++		led-failsafe = &led_power;
++		led-running = &led_power;
++		led-upgrade = &led_power;
++		label-mac-device = &eth0;
++	};
++
++	chosen {
++		bootargs = "console=ttyS0,115200n8";
++	};
++
++	leds {
++		compatible = "gpio-leds";
++
++		led_power: power {
++			function = LED_FUNCTION_POWER;
++			color = <LED_COLOR_ID_BLUE>;
++			gpios = <&gpio 19 GPIO_ACTIVE_LOW>;
++			default-state = "on";
++		};
++
++		wps {
++			function = LED_FUNCTION_WPS;
++			color = <LED_COLOR_ID_BLUE>;
++			gpios = <&gpio 20 GPIO_ACTIVE_LOW>;
++		};
++
++		wan {
++			function = LED_FUNCTION_WAN;
++			color = <LED_COLOR_ID_BLUE>;
++			gpios = <&gpio 15 GPIO_ACTIVE_HIGH>;
++		};
++
++		wan_fail {
++			function = LED_FUNCTION_WAN;
++			color = <LED_COLOR_ID_RED>;
++			gpios = <&gpio 14 GPIO_ACTIVE_HIGH>;
++		};
++
++		lan {
++			function = LED_FUNCTION_LAN;
++			color = <LED_COLOR_ID_BLUE>;
++			gpios = <&gpio 18 GPIO_ACTIVE_LOW>;
++		};
++
++		usb2 {
++			label = "blue:usb2";
++			gpios = <&gpio 4 GPIO_ACTIVE_HIGH>;
++			trigger-sources = <&hub_port0>;
++			linux,default-trigger = "usbport";
++		};
++
++		usb3 {
++			label = "blue:usb3";
++			gpios = <&gpio 1 GPIO_ACTIVE_HIGH>;
++		};
++
++		wlan2g {
++			function = LED_FUNCTION_WLAN_2GHZ;
++			color = <LED_COLOR_ID_BLUE>;
++			gpios = <&gpio 13 GPIO_ACTIVE_HIGH>;
++			linux,default-trigger = "phy1tpt";
++		};
++
++		wlan5g {
++			function = LED_FUNCTION_WLAN_5GHZ;
++			color = <LED_COLOR_ID_BLUE>;
++			gpios = <&gpio 0 GPIO_ACTIVE_HIGH>;
++			linux,default-trigger = "phy0tpt";
++		};
++	};
++
++	keys {
++		compatible = "gpio-keys";
++
++		reset {
++			label = "reset";
++			linux,code = <KEY_RESTART>;
++			gpios = <&gpio 17 GPIO_ACTIVE_LOW>;
++			debounce-interval = <60>;
++		};
++
++		wps {
++			label = "wps";
++			linux,code = <KEY_WPS_BUTTON>;
++			gpios = <&gpio 16 GPIO_ACTIVE_LOW>;
++			debounce-interval = <60>;
++		};
++	};
++};
++
++&pcie0 {
++	status = "okay";
++
++	wifi@0,0 {
++		compatible = "qcom,ath10k";
++		reg = <0 0 0 0 0>;
++
++		nvmem-cells = <&macaddr_factory_5006>, <&cal_factory_5000>;
++		nvmem-cell-names = "mac-address", "calibration";
++	};
++};
++
++/* Etron EJ168 USB 3.0 controller */
++&pcie1 {
++	status = "okay";
++};
++
++&usb_phy0 {
++	status = "okay";
++};
++
++&usb0 {
++	status = "okay";
++};
++
++&nand {
++	status = "okay";
++
++	partitions {
++		compatible = "fixed-partitions";
++		#address-cells = <1>;
++		#size-cells = <1>;
++
++		partition@0 {
++			label = "Bootloader";
++			reg = <0x0 0xe0000>;
++			read-only;
++		};
++
++		partition@e0000 {
++			label = "Config";
++			reg = <0xe0000 0x20000>;
++			read-only;
++		};
++
++		partition@100000 {
++			compatible = "linux,ubi";
++			label = "ubi";
++			reg = <0x100000 0x7e00000>;
++
++			volumes {
++				ubi-volume-factory {
++					volname = "Factory";
++
++					nvmem-layout {
++						compatible = "fixed-layout";
++						#address-cells = <1>;
++						#size-cells = <1>;
++
++						macaddr_factory_1002: macaddr@1002 {
++							reg = <0x1002 0x6>;
++						};
++
++						cal_factory_1000: calibration@1000 {
++							reg = <0x1000 0x440>;
++						};
++
++						cal_factory_5000: calibration@5000 {
++							reg = <0x5000 0x844>;
++						};
++
++						macaddr_factory_5006: macaddr@5006 {
++							reg = <0x5006 0x6>;
++						};
++					};
++				};
++			};
++		};
++
++		partition@7f00000 {
++			label = "caldata";
++			reg = <0x7f00000 0x100000>;
++			read-only;
++		};
++	};
++};
++
++&mdio0 {
++	status = "okay";
++
++	phy0: ethernet-phy@0 {
++		reg = <0>;
++
++		qca,ar8327-initvals = <
++			0x04 0x00080080 /* PORT0 PAD MODE CTRL: SGMII, to eth1 */
++			0x0c 0x07600000 /* PORT6 PAD MODE CTRL: RGMII, to eth0 */
++			0x10 0x602613a0 /* POWER_ON_STRAP */
++			0x50 0xcc35cc35 /* LED_CTRL0 */
++			0x54 0xca35ca35 /* LED_CTRL1 */
++			0x58 0xc935c935 /* LED_CTRL2 */
++			0x5c 0x03ffff00 /* LED_CTRL3 */
++			0x7c 0x0000007e /* PORT0_STATUS */
++			0x94 0x0000007e /* PORT6_STATUS */
++		>;
++	};
++};
++
++/* GMAC0 (RGMII) -> switch port 6, WAN */
++&eth0 {
++	status = "okay";
++
++	nvmem-cells = <&macaddr_factory_1002>;
++	nvmem-cell-names = "mac-address";
++	pll-data = <0x96000000 0x00000101 0x00001616>;
++
++	fixed-link {
++		speed = <1000>;
++		full-duplex;
++	};
++
++	gmac-config {
++		device = <&gmac>;
++		rgmii-enabled = <1>;
++	};
++};
++
++/* GMAC1 (SGMII) -> switch port 0, LAN */
++&eth1 {
++	status = "okay";
++
++	nvmem-cells = <&macaddr_factory_5006>;
++	nvmem-cell-names = "mac-address";
++	phy-handle = <&phy0>;
++	pll-data = <0x03000101 0x00000101 0x00001616>;
++};
++
++&wmac {
++	status = "okay";
++
++	nvmem-cells = <&macaddr_factory_1002>, <&cal_factory_1000>;
++	nvmem-cell-names = "mac-address", "calibration";
++};
+diff --git a/target/linux/ath79/image/nand.mk b/target/linux/ath79/image/nand.mk
+index 0408d6ad82..1ddf915382 100644
+--- a/target/linux/ath79/image/nand.mk
++++ b/target/linux/ath79/image/nand.mk
+@@ -79,6 +79,45 @@ define Device/aerohive_hiveap-121
+ endef
+ TARGET_DEVICES += aerohive_hiveap-121
+ 
++# The stock web UI only accepts an image with a dummy rootfs appended after
++# the kernel, which asus-trx (TRX v2) covers with the ASUS key.
++define Build/asus-fake-rootfs
++	rm -rf $@.fakefs
++	mkdir -p $@.fakefs
++	echo "OpenWrt" > $@.fakefs/fake
++	$(STAGING_DIR_HOST)/bin/mksquashfs4 $@.fakefs $@.fakehsqs -comp xz \
++		-b 4096 -no-exports -no-sparse -no-xattrs -all-root -noappend -quiet
++	cat $@.fakehsqs >> $@
++	rm -rf $@.fakefs $@.fakehsqs
++endef
++
++define Build/asus-trx
++	$(STAGING_DIR_HOST)/bin/asusuimage $(wordlist 1,$(words $(1)),$(1)) -i $@ -o $@.new
++	mv $@.new $@
++endef
++
++define Device/asus_rt-ac55u
++  SOC := qca9558
++  DEVICE_VENDOR := ASUS
++  DEVICE_MODEL := RT-AC55U
++  DEVICE_PACKAGES := kmod-usb2 kmod-usb3 kmod-usb-ledtrig-usbport \
++	kmod-ath10k-ct ath10k-firmware-qca988x-ct
++  BLOCKSIZE := 128k
++  PAGESIZE := 2048
++  LOADER_TYPE := bin
++# The ASUS bootloader expects the firmware version (3.0.0.4) and product id
++# in the uImage name. Use 3.1.1.1 to avoid NUL bytes in the string.
++  UIMAGE_NAME := $(shell printf '\003\001\001\001RT-AC55U')
++  KERNEL := kernel-bin | append-dtb | lzma | loader-kernel | uImage none
++  KERNEL_INITRAMFS := kernel-bin | append-dtb | lzma | loader-kernel | \
++	uImage none | asus-fake-rootfs | \
++	asus-trx -v 2 -n RT-AC55U -K 3.0 -F 0.4 -b 382 -e 52236
++  KERNEL_INITRAMFS_SUFFIX := -factory.trx
++  IMAGES := sysupgrade.bin
++  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
++endef
++TARGET_DEVICES += asus_rt-ac55u
++
+ define Device/domywifi_dw33d
+   SOC := qca9558
+   DEVICE_VENDOR := DomyWifi
+diff --git a/target/linux/ath79/nand/base-files/etc/board.d/01_leds b/target/linux/ath79/nand/base-files/etc/board.d/01_leds
+index ce22d0e3ce..671dcac70e 100644
+--- a/target/linux/ath79/nand/base-files/etc/board.d/01_leds
++++ b/target/linux/ath79/nand/base-files/etc/board.d/01_leds
+@@ -6,6 +6,11 @@ board_config_update
+ board=$(board_name)
+ 
+ case "$board" in
++asus,rt-ac55u)
++	ucidef_set_led_switch "lan" "LAN" "blue:lan" "switch0" "0x3c"
++	ucidef_set_led_switch "wan" "WAN" "blue:wan" "switch0" "0x02"
++	ucidef_set_led_usbport "usb3" "USB3" "blue:usb3" "usb2-port1" "usb3-port1"
++	;;
+ dongwon,dw02-412h-64m|\
+ dongwon,dw02-412h-128m)
+ 	ucidef_set_led_switch "wan" "WAN" "green:wan" "switch0" "0x02"
+diff --git a/target/linux/ath79/nand/base-files/etc/board.d/02_network b/target/linux/ath79/nand/base-files/etc/board.d/02_network
+index b495512b9d..b548f19a4e 100644
+--- a/target/linux/ath79/nand/base-files/etc/board.d/02_network
++++ b/target/linux/ath79/nand/base-files/etc/board.d/02_network
+@@ -30,6 +30,10 @@ ath79_setup_interfaces()
+ 		ucidef_set_interface_lan "eth0"
+ 		ucidef_set_interface "wan" device "/dev/cdc-wdm0" protocol "qmi"
+ 		;;
++	asus,rt-ac55u)
++		ucidef_add_switch "switch0" \
++			"0u@eth1" "2:lan:1" "3:lan:2" "4:lan:3" "5:lan:4" "1:wan" "6u@eth0"
++		;;
+ 	glinet,gl-xe300)
+ 		ucidef_set_interface_wan "eth1"
+ 		ucidef_add_switch "switch0" \
+diff --git a/target/linux/ath79/nand/base-files/lib/upgrade/asus.sh b/target/linux/ath79/nand/base-files/lib/upgrade/asus.sh
+new file mode 100644
+index 0000000000..abf24fff82
+--- /dev/null
++++ b/target/linux/ath79/nand/base-files/lib/upgrade/asus.sh
+@@ -0,0 +1,84 @@
++# The ASUS bootloader checks the UBI layout on every boot:
++# - "linux" must be at least 0x3013000 bytes, otherwise it is removed and
++#   recreated at that size (removing "jffs2" first to make room),
++# - "linux2" holds a second firmware image that is copied over "linux" if
++#   the latter fails its checksum,
++# - missing "lsdk" and "jffs2" volumes are recreated if free space allows.
++# Keep "linux" at its stock size and update it in place, leave "linux2" (stock
++# firmware or the initramfs-factory image) as a fallback, and give all
++# remaining space to rootfs_data so the bootloader cannot recreate its own
++# volumes.
++ASUS_KERNEL_VOL_SIZE=50409472
++
++asus_remove_volumes() {
++	local ubidev="$1"
++	local vol
++
++	shift
++	for vol in "$@"; do
++		vol="$(nand_find_volume "$ubidev" "$vol")"
++		[ -n "$vol" ] || continue
++		nand_remove_ubiblock "$vol" || return 1
++		ubirmvol "/dev/$ubidev" -n "${vol#${ubidev}_}" || return 1
++	done
++}
++
++asus_write_kernel() {
++	local ubidev="$1"
++	local length="$2"
++	local vol="${3:-linux}"
++
++	[ -n "$(nand_find_volume "$ubidev" "$vol")" ] || \
++		ubimkvol "/dev/$ubidev" -N "$vol" -s "$ASUS_KERNEL_VOL_SIZE" || return 1
++	ubiupdatevol "/dev/$(nand_find_volume "$ubidev" "$vol")" -s "$length" -
++}
++
++# An ASUS firmware image (stock .trx or the OpenWrt initramfs-factory.trx) is
++# written to both firmware slots like the stock web UI does, and the OpenWrt
++# volumes are removed so that the bootloader restores its stock layout on the
++# next boot.
++asus_nand_do_factory_upgrade() {
++	local file="$1"
++	local ubidev length
++
++	ubidev="$(nand_attach_ubi "$CI_UBIPART")"
++	[ -n "$ubidev" ] || return 1
++
++	asus_remove_volumes "$ubidev" rootfs rootfs_data || return 1
++	length="$(wc -c < "$file")"
++	asus_write_kernel "$ubidev" "$length" linux < "$file" || return 1
++	asus_write_kernel "$ubidev" "$length" linux2 < "$file" || return 1
++
++	sync
++	umount -a
++	reboot -f
++}
++
++asus_nand_do_upgrade() {
++	local tar_file="$1"
++	local board_dir ubidev kernel_length rootfs_length
++
++	[ "$(get_magic_long "$tar_file")" = "27051956" ] && \
++		asus_nand_do_factory_upgrade "$tar_file"
++
++	board_dir="$(tar tf "$tar_file" | grep -m 1 '^sysupgrade-.*/$')"
++	board_dir="${board_dir%/}"
++
++	kernel_length="$(tar xOf "$tar_file" "$board_dir/kernel" | wc -c)"
++	rootfs_length="$(tar xOf "$tar_file" "$board_dir/root" | wc -c)"
++	[ "$kernel_length" -gt 0 ] && [ "$rootfs_length" -gt 0 ] || return 1
++
++	ubidev="$(nand_attach_ubi "$CI_UBIPART")"
++	[ -n "$ubidev" ] || return 1
++
++	asus_remove_volumes "$ubidev" rootfs rootfs_data jffs2 lsdk || return 1
++
++	tar xOf "$tar_file" "$board_dir/kernel" | \
++		asus_write_kernel "$ubidev" "$kernel_length" || return 1
++	ubimkvol "/dev/$ubidev" -N rootfs -s "$rootfs_length" || return 1
++	ubimkvol "/dev/$ubidev" -N rootfs_data -m || return 1
++	tar xOf "$tar_file" "$board_dir/root" | \
++		ubiupdatevol "/dev/$(nand_find_volume "$ubidev" rootfs)" -s "$rootfs_length" - || return 1
++
++	nand_do_upgrade_success
++}
+diff --git a/target/linux/ath79/nand/base-files/lib/upgrade/platform.sh b/target/linux/ath79/nand/base-files/lib/upgrade/platform.sh
+index 117b2f900a..a33ce90a1e 100644
+--- a/target/linux/ath79/nand/base-files/lib/upgrade/platform.sh
++++ b/target/linux/ath79/nand/base-files/lib/upgrade/platform.sh
+@@ -14,6 +14,10 @@ platform_do_upgrade() {
+ 	local board=$(board_name)
+ 
+ 	case "$board" in
++	asus,rt-ac55u)
++		asus_nand_do_upgrade "$1"
++		nand_do_upgrade_failed
++		;;
+ 	glinet,gl-ar300m-nand|\
+ 	glinet,gl-ar300m-nor)
+ 		glinet_nand_nor_do_upgrade "$1"
+diff --git a/target/linux/ath79/nand/config-default b/target/linux/ath79/nand/config-default
+index 71ce1caad7..10dc596693 100644
+--- a/target/linux/ath79/nand/config-default
++++ b/target/linux/ath79/nand/config-default
+@@ -16,6 +16,7 @@ CONFIG_MTD_SPI_NAND=y
+ CONFIG_MTD_UBI=y
+ CONFIG_MTD_UBI_BEB_LIMIT=20
+ CONFIG_MTD_UBI_BLOCK=y
++CONFIG_MTD_UBI_NVMEM=y
+ CONFIG_MTD_UBI_WL_THRESHOLD=4096
+ # CONFIG_PCI_AR71XX is not set
+ CONFIG_POWER_RESET=y
+-- 
+2.47.3
+
