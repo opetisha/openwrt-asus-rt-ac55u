@@ -18,9 +18,28 @@ Unofficial OpenWrt **25.12.6** (ath79/nand, kernel 6.12) for the ASUS RT-AC55U, 
 | MAC addresses | same as stock (WAN `…F0`, LAN `…F4`) |
 | Free space | ~13.8 MB for packages (UBIFS overlay) |
 
-## Install (from stock firmware)
+## Downloads
 
-1. Download `openwrt-ath79-nand-asus_rt-ac55u-initramfs-factory.trx` and `openwrt-ath79-nand-asus_rt-ac55u-squashfs-sysupgrade.bin`, and check them against `sha256sums`.
+From the [latest release](https://github.com/opetisha/openwrt-asus-rt-ac55u/releases/latest), checked against `sha256sums`:
+
+| File | Use |
+|---|---|
+| `…-oneclick-factory.trx` | **Optional one-step install** from the stock web UI |
+| `…-initramfs-factory.trx` | Standard install from the stock web UI (step 1 of 2) |
+| `…-squashfs-sysupgrade.bin` | Standard install step 2, and all later upgrades |
+| `…-initramfs-kernel.bin` | RAM boot over TFTP from the bootloader console |
+
+## Install: one click (optional)
+
+1. In the ASUS web UI go to **Administration → Firmware Upgrade** and upload `openwrt-ath79-nand-asus_rt-ac55u-oneclick-factory.trx`.
+2. Wait about 4 minutes and don't power off. The router reboots into OpenWrt running from RAM, installs itself to flash, then reboots again.
+3. OpenWrt is at **http://192.168.1.1** (user `root`, no password). Set a password. Wi-Fi is disabled by default.
+
+The image carries the normal `sysupgrade.bin`. A small first-boot script installs it, but only when running from RAM on a router without OpenWrt volumes, so it can't overwrite an existing install. If anything goes wrong you end up in the RAM-booted OpenWrt, where you can continue with step 4 of the standard install.
+
+## Install: standard (from stock firmware)
+
+1. Download `openwrt-ath79-nand-asus_rt-ac55u-initramfs-factory.trx` and `openwrt-ath79-nand-asus_rt-ac55u-squashfs-sysupgrade.bin`.
 2. In the ASUS web UI go to **Administration → Firmware Upgrade**, upload the `initramfs-factory.trx` and wait for the reboot.
 3. Connect to a LAN port. OpenWrt runs from RAM at **http://192.168.1.1** (user `root`, no password).
 4. Make it permanent: in LuCI go to **System → Backup / Flash Firmware → Flash new firmware image**, upload the `squashfs-sysupgrade.bin` and **untick "Keep settings"**. Or from SSH:
@@ -34,7 +53,7 @@ Later upgrades are normal OpenWrt sysupgrades of the `sysupgrade.bin`, and setti
 ### Alternative: install over TFTP (serial console)
 Stop autoboot with `4` at the bootloader menu, then:
 ```
-tftpboot 0x81000000 openwrt-ath79-nand-asus_rt-ac55u-initramfs-factory.trx
+tftpboot 0x81000000 openwrt-ath79-nand-asus_rt-ac55u-initramfs-kernel.bin
 bootm 0x81000000
 ```
 The bootloader uses `ipaddr=192.168.1.1` and `serverip=192.168.1.10`. This boots OpenWrt from RAM without touching flash. Continue with step 4.
@@ -61,7 +80,8 @@ The ASUS bootloader (U-Boot 1.1.4) manages the UBI flash layout itself and enfor
 | `rootfs`, `rootfs_data` | OpenWrt squashfs + overlay. They replace stock `lsdk`/`jffs2` and use all free space, so the bootloader cannot recreate those |
 
 What else the port needed:
-- The stock web UI checks an ASUS signature in the uImage name (product id, build numbers and a key byte derived from the image contents). `initramfs-factory.trx` carries it, built with OpenWrt's `asusuimage` (TRX v2).
+- The stock web UI checks an ASUS signature in the uImage name (product id, build numbers and a key byte derived from the image contents). Both factory images carry it, built with OpenWrt's `asusuimage` (TRX v2). The stock updater writes the image to both `linux` and `linux2`.
+- `oneclick-factory.trx` puts the `sysupgrade.bin` where stock images keep their rootfs. On first boot, `/etc/init.d/asus_oneclick` reads it back from the `linux` volume and runs `sysupgrade -n`.
 - An lzma-loader wraps the kernel, because the 2014 bootloader cannot decompress large kernels.
 - Calibration data and MACs are read from the `Factory` UBI volume via `CONFIG_MTD_UBI_NVMEM`.
 

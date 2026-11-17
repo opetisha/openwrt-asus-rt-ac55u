@@ -1,6 +1,6 @@
-From e2f961409e652c15360ba310e5b13fa0fcc1300a Mon Sep 17 00:00:00 2001
+From ae7fd39032d9452a9aab99b5553ec1af6011a3e1 Mon Sep 17 00:00:00 2001
 From: Marko Maksimovic <reaktansa@gmail.com>
-Date: Tue, 17 Nov 2026 21:53:55 +0100
+Date: Tue, 17 Nov 2026 22:19:46 +0100
 Subject: [PATCH] ath79: add support for ASUS RT-AC55U
 
 Specifications:
@@ -29,6 +29,10 @@ Installation:
    (Administration -> Firmware Upgrade).
 2. Flash the sysupgrade.bin from the running OpenWrt initramfs.
 
+Alternatively upload the oneclick-factory.trx, which carries the
+sysupgrade image behind the initramfs kernel and installs it on first
+boot when no OpenWrt volumes exist yet.
+
 Revert to stock:
 sysupgrade -F -n <official ASUS firmware .trx>
 
@@ -36,14 +40,16 @@ Signed-off-by: Marko Maksimovic <reaktansa@gmail.com>
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../linux/ath79/dts/qca9558_asus_rt-ac55u.dts | 246 ++++++++++++++++++
- target/linux/ath79/image/nand.mk              |  39 +++
+ target/linux/ath79/image/nand.mk              |  47 ++++
  .../ath79/nand/base-files/etc/board.d/01_leds |   5 +
  .../nand/base-files/etc/board.d/02_network    |   4 +
+ .../nand/base-files/etc/init.d/asus_oneclick  |  44 ++++
  .../ath79/nand/base-files/lib/upgrade/asus.sh |  84 ++++++
  .../nand/base-files/lib/upgrade/platform.sh   |   4 +
  target/linux/ath79/nand/config-default        |   1 +
- 7 files changed, 383 insertions(+)
+ 8 files changed, 435 insertions(+)
  create mode 100644 target/linux/ath79/dts/qca9558_asus_rt-ac55u.dts
+ create mode 100755 target/linux/ath79/nand/base-files/etc/init.d/asus_oneclick
  create mode 100644 target/linux/ath79/nand/base-files/lib/upgrade/asus.sh
 
 diff --git a/target/linux/ath79/dts/qca9558_asus_rt-ac55u.dts b/target/linux/ath79/dts/qca9558_asus_rt-ac55u.dts
@@ -299,10 +305,10 @@ index 0000000000..c1ed899a78
 +	nvmem-cell-names = "mac-address", "calibration";
 +};
 diff --git a/target/linux/ath79/image/nand.mk b/target/linux/ath79/image/nand.mk
-index 0408d6ad82..1ddf915382 100644
+index 0408d6ad82..c5068d6297 100644
 --- a/target/linux/ath79/image/nand.mk
 +++ b/target/linux/ath79/image/nand.mk
-@@ -79,6 +79,45 @@ define Device/aerohive_hiveap-121
+@@ -79,6 +79,53 @@ define Device/aerohive_hiveap-121
  endef
  TARGET_DEVICES += aerohive_hiveap-121
  
@@ -316,6 +322,10 @@ index 0408d6ad82..1ddf915382 100644
 +		-b 4096 -no-exports -no-sparse -no-xattrs -all-root -noappend -quiet
 +	cat $@.fakehsqs >> $@
 +	rm -rf $@.fakefs $@.fakehsqs
++endef
++
++define Build/asus-append-sysupgrade
++	cat "$(BIN_DIR)/$(DEVICE_IMG_PREFIX)-squashfs-sysupgrade.bin" >> $@
 +endef
 +
 +define Build/asus-trx
@@ -336,12 +346,16 @@ index 0408d6ad82..1ddf915382 100644
 +# in the uImage name. Use 3.1.1.1 to avoid NUL bytes in the string.
 +  UIMAGE_NAME := $(shell printf '\003\001\001\001RT-AC55U')
 +  KERNEL := kernel-bin | append-dtb | lzma | loader-kernel | uImage none
-+  KERNEL_INITRAMFS := kernel-bin | append-dtb | lzma | loader-kernel | \
-+	uImage none | asus-fake-rootfs | \
-+	asus-trx -v 2 -n RT-AC55U -K 3.0 -F 0.4 -b 382 -e 52236
-+  KERNEL_INITRAMFS_SUFFIX := -factory.trx
++  KERNEL_INITRAMFS := kernel-bin | append-dtb | lzma | loader-kernel | uImage none
 +  IMAGES := sysupgrade.bin
 +  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
++  ARTIFACTS := initramfs-factory.trx oneclick-factory.trx
++  ARTIFACT/initramfs-factory.trx := append-image-stage initramfs-kernel.bin | \
++	asus-fake-rootfs | asus-trx -v 2 -n RT-AC55U -K 3.0 -F 0.4 -b 382 -e 52236
++# The initramfs installs the appended sysupgrade image on first boot
++  ARTIFACT/oneclick-factory.trx := append-image-stage initramfs-kernel.bin | \
++	asus-append-sysupgrade | \
++	asus-trx -v 2 -n RT-AC55U -K 3.0 -F 0.4 -b 382 -e 52236
 +endef
 +TARGET_DEVICES += asus_rt-ac55u
 +
@@ -379,6 +393,56 @@ index b495512b9d..b548f19a4e 100644
  	glinet,gl-xe300)
  		ucidef_set_interface_wan "eth1"
  		ucidef_add_switch "switch0" \
+diff --git a/target/linux/ath79/nand/base-files/etc/init.d/asus_oneclick b/target/linux/ath79/nand/base-files/etc/init.d/asus_oneclick
+new file mode 100755
+index 0000000000..7d92ad04e6
+--- /dev/null
++++ b/target/linux/ath79/nand/base-files/etc/init.d/asus_oneclick
+@@ -0,0 +1,44 @@
++#!/bin/sh /etc/rc.common
++# One-click install for the ASUS RT-AC55U: the oneclick-factory.trx flashed
++# from the stock web UI carries the sysupgrade image behind the initramfs
++# kernel. When running that initramfs on a device without OpenWrt volumes,
++# extract the sysupgrade image from the "linux" UBI volume and install it.
++
++START=99
++
++asus_oneclick_install() {
++	local vol hdr size fs_offset
++
++	for vol in /sys/class/ubi/ubi0_*; do
++		[ "$(cat "$vol/name" 2>/dev/null)" = "linux" ] && break
++		vol=
++	done
++	[ -n "$vol" ] || return 0
++	vol="/dev/${vol##*/}"
++
++	hdr="$(dd if="$vol" bs=64 count=1 2>/dev/null | hexdump -v -e '64/1 "%02x"')"
++	# uImage magic and ASUS rootfs offset marker
++	[ "${hdr:0:8}" = "27051956" ] && [ "${hdr:120:2}" = "a9" ] || return 0
++	size=$((0x${hdr:24:8}))
++	fs_offset=$((0x${hdr:122:6}))
++	[ "$fs_offset" -gt 64 ] && [ "$((size + 64))" -gt "$fs_offset" ] || return 0
++
++	tail -c +$((fs_offset + 1)) "$vol" | head -c $((size + 64 - fs_offset)) > /tmp/oneclick.bin
++	# A plain initramfs-factory.trx carries a dummy squashfs instead
++	if ! sysupgrade -T /tmp/oneclick.bin >/dev/null 2>&1; then
++		rm -f /tmp/oneclick.bin
++		return 0
++	fi
++
++	logger -t asus_oneclick "installing OpenWrt from the factory image"
++	sysupgrade -n /tmp/oneclick.bin
++}
++
++boot() {
++	[ "$(board_name)" = "asus,rt-ac55u" ] || return 0
++	# Only from the initramfs, and only on a device without OpenWrt installed
++	grep -q ' /rom ' /proc/mounts && return 0
++	ubinfo -d 0 -N rootfs_data >/dev/null 2>&1 && return 0
++
++	( sleep 15; asus_oneclick_install ) &
++}
 diff --git a/target/linux/ath79/nand/base-files/lib/upgrade/asus.sh b/target/linux/ath79/nand/base-files/lib/upgrade/asus.sh
 new file mode 100644
 index 0000000000..abf24fff82
